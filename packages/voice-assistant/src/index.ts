@@ -1,0 +1,723 @@
+/** Voice-to-Agent driver using ordinary followup, steer and cancel operations. @module @wayneyu430227/dsh-voice-assistant */
+import { randomUUID } from 'node:crypto'
+import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
+import { foldRequestHeader, KNOWN_SESSION_EVENT_TYPES, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-workspace'
+import {
+  VoiceTaskId,
+  VoiceTaskMessageId,
+  type TaskCommandCall,
+  type TaskCommandResult,
+  type TaskObservation,
+  type VoiceEvent,
+  type VoiceInteractionMode,
+  type VoiceResponseId,
+  type VoiceSessionId,
+  type VoiceSessionInfo,
+  type VoiceTaskMessage,
+  type VoiceUtteranceId,
+} from '@wayneyu430227/dsh-voice'
+import { installVoiceMessageTool, type VoiceMessageInput, type VoiceMessageReceipt } from './tool.ts'
+
+export const name = 'voice-assistant'
+export const inject = ['agentDefaultModel', 'agents', 'sessions', 'systemPrompt', 'tools', 'voice']
+
+/** Driver configuration. */
+export interface Config {
+  /** Maximum observations queued for a voice session whose transport is currently detached. */
+  readonly maxPendingObservations?: number
+  /** Spoken announcement for a completed task that produced no final backend message. */
+  readonly completedAnnouncement?: string
+  /** Spoken announcement for a failed task. */
+  readonly failedAnnouncement?: string
+  /** Spoken announcement for a cancelled task. */
+  readonly cancelledAnnouncement?: string
+}
+
+export const Config: z<Config> = z.object({
+  maxPendingObservations: z.natural().min(1).default(64),
+  completedAnnouncement: z.string().default('任务已完成。'),
+  failedAnnouncement: z.string().default('任务失败了，请查看屏幕上的错误信息。'),
+  cancelledAnnouncement: z.string().default('任务已取消。'),
+})
+
+/** Plugin-owned durable session event types, registered with core at load. */
+const VOICE_SESSION_EVENT_TYPES = [
+  'voice/task-observation',
+  'voice/task-delegated',
+  'voice/utterance-start',
+  'voice/utterance-end',
+] as const
+
+interface ActiveTask {
+  readonly id: VoiceTaskId
+  readonly interactionMode: VoiceInteractionMode
+  readonly taskSessionId: SessionId
+  readonly messageIds: Set<string>
+  agent: Agent
+  taskTurn?: number
+  lastAssistantMessage?: VoiceTaskMessage
+  completionMessage?: VoiceTaskMessage
+  disposeVoiceMessage?: () => void
+  cancelling: boolean
+}
+
+interface OpenUtterance {
+  readonly role: 'user' | 'assistant'
+  readonly responseId?: VoiceResponseId
+  text: string
+}
+
+interface Binding {
+  readonly sessionId: SessionId
+  agent?: Agent
+  voiceSessionId: VoiceSessionId | undefined
+  interactionMode: VoiceInteractionMode | undefined
+  voiceAttached: boolean
+  voiceTurnMarked: boolean
+  active: ActiveTask | undefined
+  lastTerminalTaskId: VoiceTaskId | undefined
+  readonly pending: TaskObservation[]
+  readonly utterances: Map<VoiceUtteranceId, OpenUtterance>
+  chain: Promise<void>
+}
+
+/** Install the driver. @param ctx - composed Agent and voice context. @param config - driver copy and queue bounds. */
+export function apply(ctx: Context, config: Config = {}): void {
+  const bindings = new Map<SessionId, Binding>()
+  const taskBindings = new Map<SessionId, Binding>()
+  const handles = new Map<SessionId, AgentHandle>()
+  const maxPending = config.maxPendingObservations ?? 64
+  // DSH core recognizes only its own event vocabulary at read time and has no
+  // generic "skippable plugin event" registration surface yet. A session that
+  // carries these voice events would otherwise be refused on load, so register
+  // them once at boot (the set is module-scoped and read by the persistence
+  // coordinator). This is the load-side counterpart of the `declare module`
+  // type merge; see the package README's responsibility-boundary note.
+  const knownEventTypes = KNOWN_SESSION_EVENT_TYPES as unknown as Set<string>
+  for (const type of VOICE_SESSION_EVENT_TYPES) knownEventTypes.add(type)
+
+  const bindingFor = (sessionId: SessionId): Binding => {
+    let binding = bindings.get(sessionId)
+    if (binding === undefined) {
+      binding = {
+        sessionId,
+        voiceSessionId: undefined,
+        interactionMode: undefined,
+        voiceAttached: false,
+        voiceTurnMarked: false,
+        active: undefined,
+        lastTerminalTaskId: undefined,
+        pending: [],
+        utterances: new Map(),
+        chain: Promise.resolve(),
+      }
+      bindings.set(sessionId, binding)
+    }
+    return binding
+  }
+
+  const append = (binding: Binding, observation: TaskObservation, speak: boolean): void => {
+    const session = ctx.sessions.get(binding.sessionId)
+    if (session === undefined) {
+      throw new Error(`voice-assistant: Agent session "${binding.sessionId}" is not live`)
+    }
+    session.append('voice/task-observation', observation)
+    const voiceId = binding.voiceSessionId
+    if (voiceId === undefined || !binding.voiceAttached) {
+      binding.pending.push(observation)
+      if (binding.pending.length > maxPending) binding.pending.splice(0, binding.pending.length - maxPending)
+      return
+    }
+    ctx.voice.appendTaskObservation(voiceId, observation)
+    if (speak) ctx.voice.requestResponse(voiceId, { kind: 'automatic' })
+  }
+
+  const enqueue = (binding: Binding, operation: () => Promise<void> | void): void => {
+    binding.chain = binding.chain.then(operation).catch((error: unknown) => {
+      ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
+      const task = binding.active
+      if (task === undefined) return
+      try {
+        append(binding, {
+          taskId: task.id,
+          status: 'failed',
+          ...(task.taskTurn === undefined ? {} : { taskTurn: task.taskTurn }),
+          announcement: config.failedAnnouncement ?? '任务失败了，请查看屏幕上的错误信息。',
+          reason: String(error),
+        }, true)
+      } catch (observationError: unknown) {
+        ctx.logger.warn(observationError instanceof Error ? observationError : new Error(String(observationError)))
+      } finally {
+        taskBindings.delete(task.taskSessionId)
+        try { task.disposeVoiceMessage?.() } catch (disposeError: unknown) {
+          ctx.logger.warn(disposeError instanceof Error ? disposeError : new Error(String(disposeError)))
+        }
+        binding.lastTerminalTaskId = task.id
+        binding.active = undefined
+      }
+    })
+  }
+
+  const sendVoiceMessage = (binding: Binding, input: VoiceMessageInput): VoiceMessageReceipt => {
+    const task = binding.active
+    if (task === undefined) throw new Error(`voice delegation "${input.delegationId}" is not active`)
+    if (task.id !== input.delegationId) {
+      throw new Error(`voice delegation "${input.delegationId}" does not match active delegation "${task.id}"`)
+    }
+    if (task.interactionMode !== 'frontend-agent') {
+      throw new Error(`voice delegation "${task.id}" does not accept backend voice messages`)
+    }
+    if (task.cancelling) throw new Error(`voice delegation "${task.id}" is being cancelled`)
+    const message = { id: VoiceTaskMessageId(randomUUID()), text: input.message }
+    if (input.channel === 'COMPLETE') {
+      if (task.completionMessage !== undefined) {
+        throw new Error(`voice delegation "${task.id}" already has a COMPLETE message`)
+      }
+      task.completionMessage = message
+      return { messageId: message.id, delivery: 'held_until_turn_end' }
+    }
+    if (task.completionMessage !== undefined) {
+      throw new Error(`voice delegation "${task.id}" already has a COMPLETE message`)
+    }
+    append(binding, {
+      taskId: task.id,
+      status: 'running',
+      ...(task.taskTurn === undefined ? {} : { taskTurn: task.taskTurn }),
+      channel: 'STATUS',
+      voiceMessage: message,
+    }, true)
+    return { messageId: message.id, delivery: 'queued' }
+  }
+
+  const ensureAgent = async (binding: Binding): Promise<Agent> => {
+    const live = ctx.agents.get(binding.sessionId)
+    if (live !== undefined) {
+      binding.agent = live
+      return live
+    }
+    if (binding.agent !== undefined) return binding.agent
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence === undefined) throw new Error(`voice-assistant: Agent session "${binding.sessionId}" is not live and persistence is unavailable`)
+    const inspected = await persistence.inspect(binding.sessionId)
+    const header = foldRequestHeader(inspected.events)
+    const defaults = ctx.agentDefaultModel.currentSelection()
+    const presetId = resolveSessionPreset({ header: inspected.meta, events: inspected.events })
+    const presets = ctx.get('agentPresets')
+    const handle = await ctx.agents.resume({
+      resumeSessionId: binding.sessionId,
+      agentOptions: {
+        provider: header?.config.provider ?? defaults.provider,
+        model: header?.config.model ?? defaults.model,
+      },
+      ...(presets === undefined ? {} : { setup: async (agentCtx: Context) => { await presets.mount(agentCtx, presetId) } }),
+    })
+    handles.set(binding.sessionId, handle)
+    binding.agent = handle.agent
+    return handle.agent
+  }
+
+  const createTaskAgent = async (binding: Binding, taskSessionId: SessionId): Promise<{
+    readonly agent: Agent
+    readonly disposeVoiceMessage: () => void
+  }> => {
+    const sourceAgent = await ensureAgent(binding)
+    const sourceSession = ctx.sessions.get(binding.sessionId)
+    if (sourceSession === undefined) {
+      throw new Error(`voice-assistant: source session "${binding.sessionId}" is not live`)
+    }
+    const defaults = ctx.agentDefaultModel.currentSelection()
+    const header = foldRequestHeader(sourceSession.events)
+    const presetId = resolveSessionPreset(sourceSession)
+    const presets = ctx.get('agentPresets')
+    let disposeVoiceMessage: (() => void) | undefined
+    const handle = await ctx.agents.create({
+      sessionId: taskSessionId,
+      meta: {
+        ...(sourceSession.header.cwd === undefined ? {} : { cwd: sourceSession.header.cwd }),
+        ...(presetId === undefined ? {} : { agentPreset: presetId }),
+      },
+      agentOptions: {
+        provider: sourceAgent.options.provider ?? header?.config.provider ?? defaults.provider,
+        model: sourceAgent.options.model ?? header?.config.model ?? defaults.model,
+      },
+      setup: (agentCtx: Context) => {
+        presets?.composeFrom(agentCtx, sourceAgent.ctx)
+        disposeVoiceMessage = installVoiceMessageTool(agentCtx, input => sendVoiceMessage(binding, input))
+      },
+    })
+    handles.set(taskSessionId, handle)
+    try {
+      const workspace = ctx.get('workspaceRegistry')?.list()
+        .find(candidate => candidate.sessionIds.includes(binding.sessionId))
+      await workspace?.attachSession(taskSessionId)
+    } catch (error: unknown) {
+      handles.delete(taskSessionId)
+      await handle.dispose()
+      throw error
+    }
+    if (disposeVoiceMessage === undefined) {
+      handles.delete(taskSessionId)
+      await handle.dispose()
+      throw new Error('voice-assistant: delegated Agent setup did not install send_voice_message')
+    }
+    return { agent: handle.agent, disposeVoiceMessage }
+  }
+
+  const requireSourceSession = (binding: Binding) => {
+    const session = ctx.sessions.get(binding.sessionId)
+    if (session === undefined) {
+      throw new Error(`voice-assistant: source session "${binding.sessionId}" is not live`)
+    }
+    return session
+  }
+
+  // A frontend-agent voice conversation runs its text work in independent task
+  // sessions, so its source session would otherwise carry no `turn/start` and be
+  // treated as a reusable blank session by the workspace new-session flow. Mark
+  // it with one complete empty turn the first time it gains conversation content.
+  const markVoiceTurn = (binding: Binding): void => {
+    if (binding.interactionMode !== 'frontend-agent' || binding.voiceTurnMarked) return
+    const session = requireSourceSession(binding)
+    session.append('turn/start', { turn: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    binding.voiceTurnMarked = true
+  }
+
+  const beginUtterance = (
+    binding: Binding,
+    utteranceId: VoiceUtteranceId,
+    role: 'user' | 'assistant',
+    responseId?: VoiceResponseId,
+  ): OpenUtterance => {
+    const existing = binding.utterances.get(utteranceId)
+    if (existing !== undefined) {
+      if (existing.role !== role || existing.responseId !== responseId) {
+        throw new Error(`voice utterance "${utteranceId}" was reused with different metadata`)
+      }
+      return existing
+    }
+    const utterance: OpenUtterance = {
+      role,
+      text: '',
+      ...(responseId === undefined ? {} : { responseId }),
+    }
+    binding.utterances.set(utteranceId, utterance)
+    markVoiceTurn(binding)
+    requireSourceSession(binding).append('voice/utterance-start', {
+      utteranceId,
+      role,
+      ...(responseId === undefined ? {} : { responseId }),
+    })
+    return utterance
+  }
+
+  const appendUtteranceDelta = (
+    binding: Binding,
+    utteranceId: VoiceUtteranceId,
+    role: 'user' | 'assistant',
+    text: string,
+    responseId?: VoiceResponseId,
+  ): void => {
+    beginUtterance(binding, utteranceId, role, responseId).text += text
+  }
+
+  const endUtterance = (
+    binding: Binding,
+    utteranceId: VoiceUtteranceId,
+    role: 'user' | 'assistant',
+    state: 'completed' | 'interrupted',
+    finalText?: string,
+    responseId?: VoiceResponseId,
+  ): void => {
+    const utterance = beginUtterance(binding, utteranceId, role, responseId)
+    requireSourceSession(binding).append('voice/utterance-end', {
+      utteranceId,
+      role,
+      text: finalText ?? utterance.text,
+      state,
+      ...(responseId === undefined ? {} : { responseId }),
+    })
+    binding.utterances.delete(utteranceId)
+  }
+
+  const interruptAssistantUtterances = (binding: Binding, responseId?: VoiceResponseId): void => {
+    for (const [utteranceId, utterance] of binding.utterances) {
+      if (utterance.role !== 'assistant') continue
+      if (responseId !== undefined && utterance.responseId !== responseId) continue
+      endUtterance(binding, utteranceId, 'assistant', 'interrupted', undefined, utterance.responseId)
+    }
+  }
+
+  const interruptAllUtterances = (binding: Binding): void => {
+    for (const [utteranceId, utterance] of binding.utterances) {
+      endUtterance(binding, utteranceId, utterance.role, 'interrupted', undefined, utterance.responseId)
+    }
+  }
+
+  const onTranscription = async (binding: Binding, text: string): Promise<void> => {
+    const trimmed = text.trim()
+    if (trimmed === '') return
+    const agent = await ensureAgent(binding)
+    const message = createUserMessage({ content: [{ type: 'text', text: trimmed }], source: { kind: 'user' as const } })
+    if (binding.active === undefined) {
+      const task: ActiveTask = {
+        id: VoiceTaskId(randomUUID()),
+        interactionMode: 'speech-shell',
+        taskSessionId: binding.sessionId,
+        messageIds: new Set([message.id]),
+        agent,
+        cancelling: false,
+      }
+      binding.active = task
+      taskBindings.set(task.taskSessionId, binding)
+      append(binding, { taskId: task.id, status: 'accepted' }, false)
+      agent.followup(message)
+      return
+    }
+    binding.active.messageIds.add(message.id)
+    append(binding, {
+      taskId: binding.active.id,
+      status: 'accepted',
+      ...(binding.active.taskTurn === undefined ? {} : { taskTurn: binding.active.taskTurn }),
+    }, false)
+    agent.steer(message)
+  }
+
+  const onTaskCommand = async (
+    binding: Binding,
+    voiceSessionId: VoiceSessionId,
+    call: TaskCommandCall,
+  ): Promise<void> => {
+    const complete = (result: TaskCommandResult): void => {
+      ctx.voice.completeTaskCommand(voiceSessionId, call.id, result)
+    }
+    const backendUnavailable = (error: unknown): void => {
+      complete({ kind: 'rejected', code: 'backend_unavailable', message: error instanceof Error ? error.message : String(error) })
+    }
+    switch (call.command.type) {
+      case 'realtime_delegation': {
+        if (binding.active !== undefined) {
+          complete({ kind: 'rejected', code: 'task_active', message: `task "${binding.active.id}" is still active` })
+          return
+        }
+        const taskId = VoiceTaskId(randomUUID())
+        const taskSessionId = SessionId(`session-${randomUUID()}`)
+        let created: Awaited<ReturnType<typeof createTaskAgent>>
+        try { created = await createTaskAgent(binding, taskSessionId) } catch (error) { backendUnavailable(error); return }
+        const message = createUserMessage({
+          content: [{ type: 'text', text: renderRealtimeDelegation(taskId, call.command.input, call.command.transcriptDelta) }],
+          source: { kind: 'user' },
+        })
+        const task: ActiveTask = {
+          id: taskId,
+          interactionMode: 'frontend-agent',
+          taskSessionId,
+          messageIds: new Set([message.id]),
+          agent: created.agent,
+          disposeVoiceMessage: created.disposeVoiceMessage,
+          cancelling: false,
+        }
+        binding.active = task
+        taskBindings.set(taskSessionId, binding)
+        try {
+          requireSourceSession(binding).append('voice/task-delegated', {
+            taskId,
+            taskSessionId,
+            input: call.command.input,
+          })
+          created.agent.followup(message)
+        } catch (error) {
+          taskBindings.delete(taskSessionId)
+          binding.active = undefined
+          try { task.disposeVoiceMessage?.() } catch (cleanupError: unknown) {
+            ctx.logger.warn(cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)))
+          }
+          try {
+            append(binding, {
+              taskId,
+              status: 'failed',
+              announcement: config.failedAnnouncement ?? '任务失败了，请查看屏幕上的错误信息。',
+              reason: error instanceof Error ? error.message : String(error),
+            }, true)
+          } finally {
+            backendUnavailable(error)
+          }
+          return
+        }
+        complete({ kind: 'accepted', taskId: task.id })
+        append(binding, { taskId: task.id, status: 'accepted' }, false)
+        return
+      }
+      case 'send_task_message': {
+        const rejection = taskRejection(binding, call.command.taskId)
+        if (rejection !== undefined) { complete(rejection); return }
+        const task = binding.active
+        if (task === undefined) throw new Error('voice-assistant task state changed during command dispatch')
+        const message = createUserMessage({
+          content: [{ type: 'text', text: renderRealtimeDelegationUpdate(task.id, call.command.message) }],
+          source: { kind: 'plugin', plugin: 'voice-assistant' },
+        })
+        task.messageIds.add(message.id)
+        try { task.agent.steer(message) } catch (error) { task.messageIds.delete(message.id); backendUnavailable(error); return }
+        complete({ kind: 'accepted', taskId: task.id })
+        append(binding, {
+          taskId: task.id,
+          status: 'accepted',
+          ...(task.taskTurn === undefined ? {} : { taskTurn: task.taskTurn }),
+        }, false)
+        return
+      }
+      case 'cancel_task': {
+        const rejection = taskRejection(binding, call.command.taskId)
+        if (rejection !== undefined) { complete(rejection); return }
+        const task = binding.active
+        if (task === undefined) throw new Error('voice-assistant task state changed during command dispatch')
+        task.cancelling = true
+        try { task.agent.cancel({ kind: 'user' }) } catch (error) { task.cancelling = false; backendUnavailable(error); return }
+        complete({ kind: 'accepted', taskId: task.id })
+        return
+      }
+      default: assertNever(call.command)
+    }
+  }
+
+  ctx.on('voice/session-opened', (session) => {
+    const binding = bindingFor(session.agentSessionId)
+    binding.voiceSessionId = session.id
+    binding.interactionMode = session.interactionMode
+    binding.voiceAttached = true
+    enqueue(binding, async () => {
+      if (session.interactionMode === 'speech-shell') await ensureAgent(binding)
+      if (binding.voiceSessionId !== session.id) return
+      if (binding.pending.length !== 0) {
+        const observations = binding.pending.splice(0)
+        for (const observation of observations) ctx.voice.appendTaskObservation(session.id, observation)
+        ctx.voice.requestResponse(session.id, { kind: 'automatic' })
+      }
+    })
+  })
+
+  ctx.on('voice/session-detached', (session) => {
+    const binding = bindings.get(session.agentSessionId)
+    if (binding?.voiceSessionId !== session.id) return
+    binding.voiceAttached = false
+    enqueue(binding, () => { interruptAllUtterances(binding) })
+  })
+
+  ctx.on('voice/session-closed', (session) => {
+    const binding = bindings.get(session.agentSessionId)
+    if (binding?.voiceSessionId !== session.id) return
+    binding.voiceSessionId = undefined
+    binding.interactionMode = undefined
+    binding.voiceAttached = false
+    enqueue(binding, () => { interruptAllUtterances(binding) })
+  })
+
+  ctx.on('voice/session-event', (session: VoiceSessionInfo, event: VoiceEvent) => {
+    const binding = bindingFor(session.agentSessionId)
+    if (binding.voiceSessionId !== session.id) return
+    switch (event.type) {
+      case 'transcription.started':
+        enqueue(binding, () => { beginUtterance(binding, event.utteranceId, 'user') })
+        return
+      case 'transcription.updated':
+        enqueue(binding, () => { beginUtterance(binding, event.utteranceId, 'user').text = event.text })
+        return
+      case 'transcription.completed':
+        enqueue(binding, async () => {
+          endUtterance(binding, event.utteranceId, 'user', 'completed', event.text)
+          if (session.interactionMode === 'speech-shell' && binding.voiceSessionId === session.id) {
+            await onTranscription(binding, event.text)
+          }
+        })
+        return
+      case 'transcription.failed':
+        enqueue(binding, () => { endUtterance(binding, event.utteranceId, 'user', 'interrupted') })
+        return
+      case 'output_text.started':
+        enqueue(binding, () => { beginUtterance(binding, event.utteranceId, 'assistant', event.responseId) })
+        return
+      case 'output_text.delta':
+        enqueue(binding, () => {
+          appendUtteranceDelta(binding, event.utteranceId, 'assistant', event.text, event.responseId)
+        })
+        return
+      case 'output_text.done':
+        enqueue(binding, () => {
+          endUtterance(binding, event.utteranceId, 'assistant', 'completed', event.text, event.responseId)
+        })
+        return
+      case 'response.interrupted':
+        enqueue(binding, () => { interruptAssistantUtterances(binding, event.responseId) })
+        return
+      case 'task.command':
+        if (session.interactionMode === 'frontend-agent') {
+          enqueue(binding, () => binding.voiceSessionId === session.id
+            ? onTaskCommand(binding, session.id, event.call)
+            : undefined)
+        }
+        return
+      case 'output_audio.started':
+      case 'output_audio.delta':
+      case 'output_audio.done':
+      case 'task.observation':
+      case 'error':
+      case 'closed':
+        return
+      default:
+        assertNever(event)
+    }
+  })
+
+  ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
+    const binding = taskBindings.get(agent.id)
+    if (binding === undefined) return
+    enqueue(binding, () => {
+      const task = binding.active
+      if (task === undefined || task.agent !== agent || !task.messageIds.has(message.id)) return
+      task.taskTurn ??= turn
+      append(binding, { taskId: task.id, status: 'running', taskTurn: turn }, false)
+    })
+  })
+
+  ctx.on('session/event', (session, event) => {
+    const binding = taskBindings.get(session.id)
+    if (binding === undefined) return
+    enqueue(binding, () => {
+      if (observeSessionEvent(binding, event, append, config, (error) => {
+        ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
+      })) {
+        taskBindings.delete(session.id)
+      }
+    })
+  })
+
+  ctx.effect(() => async () => {
+    await Promise.all([...bindings.values()].map(binding => binding.chain))
+    const failures: unknown[] = []
+    for (const binding of bindings.values()) {
+      const dispose = binding.active?.disposeVoiceMessage
+      if (binding.active !== undefined) delete binding.active.disposeVoiceMessage
+      try {
+        dispose?.()
+      } catch (error: unknown) {
+        failures.push(error)
+      }
+    }
+    const settled = await Promise.allSettled([...handles.values()].map(handle => handle.dispose()))
+    for (const result of settled) {
+      if (result.status === 'rejected') failures.push(result.reason)
+    }
+    bindings.clear()
+    taskBindings.clear()
+    handles.clear()
+    if (failures.length > 0) throw new AggregateError(failures, 'failed to dispose voice-assistant resources')
+  }, 'voice-assistant lifecycle')
+}
+
+function observeSessionEvent(
+  binding: Binding,
+  event: SessionEvent,
+  append: (binding: Binding, observation: TaskObservation, speak: boolean) => void,
+  config: Config,
+  onDisposeError: (error: unknown) => void,
+): boolean {
+  const task = binding.active
+  if (task === undefined || task.taskTurn === undefined) return false
+  if (event.type === 'assistant/message' && event.data.turn === task.taskTurn) {
+    const text = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('').trim()
+    if (text !== '') {
+      const message = { id: VoiceTaskMessageId(event.data.message.id), text }
+      task.lastAssistantMessage = message
+      if (task.interactionMode === 'speech-shell') {
+        append(binding, { taskId: task.id, status: 'running', taskTurn: task.taskTurn, voiceMessage: message }, true)
+      }
+    }
+    return false
+  }
+  if (event.type !== 'turn/end' || event.data.turn !== task.taskTurn) return false
+  const status = terminalStatus(event.data.reason.kind)
+  const message = status === 'completed' && task.interactionMode === 'frontend-agent'
+    ? task.completionMessage ?? task.lastAssistantMessage
+    : undefined
+  const hasCompletedOutput = task.interactionMode === 'frontend-agent'
+    ? message !== undefined
+    : task.lastAssistantMessage !== undefined
+  const announcement = status === 'completed'
+    ? hasCompletedOutput ? undefined : config.completedAnnouncement ?? '任务已完成。'
+    : status === 'cancelled'
+      ? config.cancelledAnnouncement ?? '任务已取消。'
+      : config.failedAnnouncement ?? '任务失败了，请查看屏幕上的错误信息。'
+  append(binding, {
+    taskId: task.id,
+    status,
+    taskTurn: task.taskTurn,
+    ...(message === undefined ? {} : { channel: 'COMPLETE' as const, voiceMessage: message }),
+    ...(announcement === undefined ? {} : { announcement }),
+    ...(status === 'failed' ? { reason: event.data.reason.kind } : {}),
+  }, task.interactionMode === 'frontend-agent' || announcement !== undefined)
+  const disposeVoiceMessage = task.disposeVoiceMessage
+  delete task.disposeVoiceMessage
+  binding.lastTerminalTaskId = task.id
+  binding.active = undefined
+  try {
+    disposeVoiceMessage?.()
+  } catch (error: unknown) {
+    onDisposeError(error)
+  }
+  return true
+}
+
+function taskRejection(binding: Binding, taskId: VoiceTaskId): TaskCommandResult | undefined {
+  const active = binding.active
+  if (active === undefined) {
+    return binding.lastTerminalTaskId === taskId
+      ? { kind: 'rejected', code: 'task_not_active', message: `task "${taskId}" is terminal` }
+      : { kind: 'rejected', code: 'task_not_found', message: `task "${taskId}" is not known` }
+  }
+  if (active.id !== taskId) return { kind: 'rejected', code: 'task_not_found', message: `task "${taskId}" is not active` }
+  if (active.cancelling) return { kind: 'rejected', code: 'task_not_active', message: `task "${taskId}" is being cancelled` }
+  return undefined
+}
+
+function renderRealtimeDelegation(taskId: VoiceTaskId, input: string, transcriptDelta?: string): string {
+  return [
+    '<realtime_delegation>',
+    `  <delegation_id>${escapeXmlText(taskId)}</delegation_id>`,
+    `  <input>${escapeXmlText(input)}</input>`,
+    ...(transcriptDelta === undefined
+      ? []
+      : [`  <transcript_delta>${escapeXmlText(transcriptDelta)}</transcript_delta>`]),
+    '</realtime_delegation>',
+  ].join('\n')
+}
+
+function renderRealtimeDelegationUpdate(taskId: VoiceTaskId, message: string): string {
+  return [
+    '<realtime_delegation_update>',
+    `  <delegation_id>${escapeXmlText(taskId)}</delegation_id>`,
+    `  <message>${escapeXmlText(message)}</message>`,
+    '</realtime_delegation_update>',
+  ].join('\n')
+}
+
+function escapeXmlText(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+}
+
+function terminalStatus(reason: string): 'completed' | 'failed' | 'cancelled' {
+  if (reason === 'completed') return 'completed'
+  if (reason === 'aborted') return 'cancelled'
+  return 'failed'
+}
+
+function assertNever(value: never): never {
+  throw new Error(`unexpected task command: ${JSON.stringify(value)}`)
+}
