@@ -2,9 +2,16 @@
 
 English | [中文](README.md)
 
-A conversational voice frontend Agent for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`).
+Talk to your dsh coding Agent the way you talk to ChatGPT Advanced Voice — except it doesn't just chat, it actually gets the work done.
 
-It speaks with you over ByteDance Duplex, delegates your spoken requests to background dsh tasks, and reports their asynchronous results back by voice. The frontend Agent exposes exactly three orchestration tools (`realtime_delegation`, `send_task_message`, `cancel_task`); the text Agent runs each accepted delegation in an independent Session and reports progress through the scoped `send_voice_message` tool.
+Say a request out loud and dsh answers you in real time. When the request is real work (inspect code, run a build, edit a file…), the voice frontend hands it to an independent background Agent; keep talking or switch to another session while it runs, and when it finishes, the result is spoken back to you instead of made up.
+
+## Interaction
+
+- **Full-duplex, real-time**: ByteDance Duplex makes it feel like talking to a person — listen and speak at once, interrupt, or correct yourself mid-sentence.
+- **Conversational delegation**: the frontend exposes exactly three orchestration tools — `realtime_delegation` (turn "check this for me" into a real background task), `send_task_message` (add or correct requirements), and `cancel_task`.
+- **Asynchronous result backfill**: the task runs in an independent Session; progress (STATUS) and the final result (COMPLETE) flow back into the voice conversation, and the frontend reports the facts.
+- **Uninterrupted flow**: switching browser tabs or reconnecting never stops the live voice session or the task behind it.
 
 ## Install
 
