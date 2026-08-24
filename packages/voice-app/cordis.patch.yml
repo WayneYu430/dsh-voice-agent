@@ -1,0 +1,41 @@
+# Voice interaction mode layered after dsh-base and dsh-web-app.
+- insert:
+    - id: voice
+      name: '@wayneyu430227/dsh-voice'
+      config:
+        provider: duplex
+
+    - id: voice-duplex
+      name: '@wayneyu430227/dsh-voice-duplex'
+      config:
+        interactionMode: frontend-agent
+        frontendAgentTriggerAudioPath: frontend-trigger.pcm
+        apiKeyEnv: DUPLEX_API_KEY
+        appKeyEnv: DUPLEX_APP_KEY
+        endpoint: wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue
+        authMode: app-key
+        appId: '7620217375'
+        resourceId: volc.speech.dialog
+        model: 1.2.6.1
+        speaker: zh_female_xiaohe_jupiter_bigtts
+        endSmoothWindowMs: 1500
+        enableCustomVad: true
+        transcriptionDeltaTimeoutMs: 1000
+
+    - id: voice-assistant
+      name: '@wayneyu430227/dsh-voice-assistant'
+      config:
+        maxPendingObservations: 64
+        completedAnnouncement: 任务已完成。
+        failedAnnouncement: 任务失败了，请查看屏幕上的错误信息。
+        cancelledAnnouncement: 任务已取消。
+
+    - id: voice-web
+      name: '@wayneyu430227/dsh-voice-web'
+      inject: [webRuntime]
+      config:
+        trustedHosts: !!js ctx.webRuntime.trustedHosts
+        maxAudioFrameBytes: 65536
+
+    - id: ui-voice
+      name: '@wayneyu430227/dsh-client-ui-voice'

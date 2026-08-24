@@ -1,0 +1,27 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../voice"
+    },
+    {
+      "path": "../voice-duplex"
+    },
+    {
+      "path": "../voice-assistant"
+    },
+    {
+      "path": "../voice-web"
+    },
+    {
+      "path": "../ui-voice"
+    }
+  ]
+}
