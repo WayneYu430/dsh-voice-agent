@@ -1,0 +1,70 @@
+{
+  "compilerOptions": {
+    "target": "es2024",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "declaration": true,
+    "sourceMap": true,
+    "declarationMap": true,
+    "composite": true,
+    "incremental": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": false,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "@wayneyu430227/dsh-voice": [
+        "./packages/voice/src"
+      ],
+      "@wayneyu430227/dsh-voice/invariant": [
+        "./packages/voice/src/invariant.ts"
+      ],
+      "@wayneyu430227/dsh-voice-duplex": [
+        "./packages/voice-duplex/src"
+      ],
+      "@wayneyu430227/dsh-voice-duplex/invariant": [
+        "./packages/voice-duplex/src/invariant.ts"
+      ],
+      "@wayneyu430227/dsh-voice-assistant": [
+        "./packages/voice-assistant/src"
+      ],
+      "@wayneyu430227/dsh-voice-assistant/invariant": [
+        "./packages/voice-assistant/src/invariant.ts"
+      ],
+      "@wayneyu430227/dsh-voice-web": [
+        "./packages/voice-web/src"
+      ],
+      "@wayneyu430227/dsh-voice-web/invariant": [
+        "./packages/voice-web/src/invariant.ts"
+      ],
+      "@wayneyu430227/dsh-client-ui-voice": [
+        "./packages/ui-voice/src"
+      ],
+      "@wayneyu430227/dsh-client-ui-voice/invariant": [
+        "./packages/ui-voice/src/invariant.ts"
+      ],
+      "@wayneyu430227/dsh-client-ui-voice/client": [
+        "./packages/ui-voice/src/client"
+      ],
+      "@wayneyu430227/dsh-voice-app": [
+        "./packages/voice-app/src"
+      ],
+      "@wayneyu430227/dsh-voice-app/invariant": [
+        "./packages/voice-app/src/invariant.ts"
+      ]
+    }
+  }
+}
