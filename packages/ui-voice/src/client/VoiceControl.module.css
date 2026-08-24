@@ -1,0 +1,18 @@
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+.button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.active { color: var(--dsw-alias-state-business-primary); background: var(--dsw-alias-interactive-bg-hover-solid); }
+.button[data-state='speaking'] { animation: voice-pulse 1.2s ease-in-out infinite; }
+@keyframes voice-pulse { 50% { opacity: .55; transform: scale(.94); } }
+@media (prefers-reduced-motion: reduce) { .button[data-state='speaking'] { animation: none; } }

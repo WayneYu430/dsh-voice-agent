@@ -1,0 +1,79 @@
+.root {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(520px, calc(100vw - 36px));
+  min-height: 36px;
+  padding: 4px 6px 4px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-overlay);
+  box-shadow: var(--dsw-shadow-lv2);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 18px;
+  pointer-events: auto;
+}
+
+.wave {
+  display: inline-flex;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.wave i {
+  width: 2px;
+  height: 5px;
+  border-radius: 1px;
+  background: currentcolor;
+  animation: voice-wave 900ms ease-in-out infinite alternate;
+}
+
+.wave i:nth-child(2) { height: 11px; animation-delay: -300ms; }
+.wave i:nth-child(3) { height: 8px; animation-delay: -600ms; }
+.wave i:nth-child(4) { height: 4px; animation-delay: -150ms; }
+.root[data-state='connecting'] .wave,
+.root[data-state='error'] .wave { opacity: .55; }
+.root[data-state='error'] .wave { color: var(--dsw-alias-state-error-primary); }
+
+.status {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link,
+.stop {
+  flex: none;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: inherit;
+}
+
+.link:hover:not(:disabled),
+.stop:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.link:disabled { cursor: default; opacity: .45; }
+.stop { color: var(--dsw-alias-state-error-primary); }
+
+@keyframes voice-wave {
+  to { transform: scaleY(.55); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wave i { animation: none; }
+}

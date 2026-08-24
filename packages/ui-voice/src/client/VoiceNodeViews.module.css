@@ -1,0 +1,141 @@
+.utterance {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.utterance[data-role='user'] { align-items: flex-end; }
+
+.bubble {
+  max-width: min(525px, 82%);
+  padding: 10px 16px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 18px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-size: 16px;
+  line-height: 24px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.utterance[data-role='user'] .bubble {
+  border-color: transparent;
+  background: var(--dsw-specific-bubble);
+}
+
+.utterance[data-state='streaming'] .bubble { color: var(--dsw-alias-label-secondary); }
+
+.meta,
+.voiceBadge {
+  display: inline-flex;
+  align-items: center;
+}
+
+.meta {
+  gap: 8px;
+  padding: 0 5px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.voiceBadge {
+  gap: 4px;
+  color: var(--dsw-alias-state-business-primary);
+  font-weight: 600;
+  letter-spacing: .04em;
+}
+
+.miniWave {
+  display: inline-flex;
+  height: 10px;
+  align-items: center;
+  gap: 1px;
+}
+
+.miniWave i {
+  width: 1.5px;
+  height: 4px;
+  border-radius: 1px;
+  background: currentcolor;
+}
+
+.miniWave i:nth-child(2) { height: 8px; }
+.miniWave i:nth-child(3) { height: 6px; }
+
+.taskCard {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-module-platform);
+}
+
+.taskHeader {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.taskDot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.taskCard[data-status='completed'] .taskDot { background: var(--dsw-alias-state-success-primary); }
+.taskCard[data-status='failed'] .taskDot { background: var(--dsw-alias-state-error-primary); }
+.taskCard[data-status='cancelled'] .taskDot { background: var(--dsw-alias-state-warn-primary); }
+
+.taskTitle {
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taskStatus {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.taskInput,
+.taskUpdate {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.taskInput { color: var(--dsw-alias-label-primary); }
+.taskUpdate { color: var(--dsw-alias-label-secondary); }
+
+.taskLink {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-state-business-primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.taskLink:hover:not(:disabled) { text-decoration: underline; text-underline-position: from-font; }
+.taskLink:disabled { color: var(--dsw-alias-label-tertiary); cursor: default; }
