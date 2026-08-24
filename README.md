@@ -1,31 +1,33 @@
 # dsh-voice-plugin
 
-A conversational voice frontend Agent for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`).
+[English](README.en.md) | 中文
 
-It speaks with you over ByteDance Duplex, delegates your spoken requests to background dsh tasks, and reports their asynchronous results back by voice. The frontend Agent exposes exactly three orchestration tools (`realtime_delegation`, `send_task_message`, `cancel_task`); the text Agent runs each accepted delegation in an independent Session and reports progress through the scoped `send_voice_message` tool.
+一个面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的对话式语音前端 Agent。
 
-## Install
+它通过 ByteDance Duplex 与你对话，把你的语音请求委派给后台 dsh 任务，并用语音回报异步结果。前端 Agent 只暴露三个编排工具（`realtime_delegation`、`send_task_message`、`cancel_task`）；文本 Agent 在独立 Session 中执行每个已接受的委派，并通过作用域内的 `send_voice_message` 工具回报进度。
+
+## 安装
 
 ```sh
 dsh plugin add @wayneyu430227/dsh-voice-app
 ```
 
-Or into a named profile:
+或安装到指定 profile：
 
 ```sh
-dsh plugin --profile <name> add @wayneyu430227/dsh-voice-app
+dsh plugin --profile <名称> add @wayneyu430227/dsh-voice-app
 ```
 
-## Credentials
+## 凭据
 
-The Duplex provider reads two credential references from the environment:
+Duplex provider 从环境读取两个凭据引用：
 
-- `DUPLEX_API_KEY` — ByteDance Volcengine access key.
-- `DUPLEX_APP_KEY` — the matching app key.
+- `DUPLEX_API_KEY` —— ByteDance 火山引擎 access key。
+- `DUPLEX_APP_KEY` —— 对应的 app key。
 
-Set both before starting a voice conversation; the provider session fails the handshake without them.
+开始语音对话前需设置两者；缺少时 provider 会话握手失败。
 
-## Limitations
+## 限制
 
-- The browser microphone and playback surface targets the dsh Web UI: it is emitted by the copied dsh client tsdown preset and loads through the dsh web runtime's `window.__ModuleLoader__` contract, so it is not a framework-agnostic browser plugin.
-- Voice Sessions record durable `voice/*` events that are required-on-read; a dsh build without this plugin refuses to load them.
+- 浏览器麦克风与播放界面面向 dsh Web UI：它由复制而来的 dsh client tsdown 预设构建，并通过 dsh web 运行时的 `window.__ModuleLoader__` 契约加载，因此不是框架无关的浏览器插件。
+- Voice Session 记录按「读取时必需」处理的持久 `voice/*` 事件；不带本插件的 dsh 构建加载它们会被拒绝。
