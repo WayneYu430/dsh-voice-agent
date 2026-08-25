@@ -16,13 +16,13 @@ Say a request out loud and dsh answers you in real time. When the request is rea
 ## Install
 
 ```sh
-dsh plugin add @wayneyu430227/dsh-voice-agent
+dsh plugin --profile web add @wayneyu430227/dsh-voice-agent
 ```
 
-Or into a named profile:
+The `dsh` command comes from `npm install -g @deepseek-ai/dsh`. Launch web (the voice surface loads with it):
 
 ```sh
-dsh plugin --profile <name> add @wayneyu430227/dsh-voice-agent
+dsh web
 ```
 
 ## Credentials

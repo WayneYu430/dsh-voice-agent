@@ -16,13 +16,13 @@
 ## 安装
 
 ```sh
-dsh plugin add @wayneyu430227/dsh-voice-agent
+dsh plugin --profile web add @wayneyu430227/dsh-voice-agent
 ```
 
-或安装到指定 profile：
+`dsh` 命令来自 `npm install -g @deepseek-ai/dsh`。启动 web（voice 界面随之加载）：
 
 ```sh
-dsh plugin --profile <名称> add @wayneyu430227/dsh-voice-agent
+dsh web
 ```
 
 ## 凭据
