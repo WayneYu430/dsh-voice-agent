@@ -192,7 +192,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       ...(task.taskTurn === undefined ? {} : { taskTurn: task.taskTurn }),
       channel: 'STATUS',
       voiceMessage: message,
-    }, true)
+    }, false)
     return { messageId: message.id, delivery: 'queued' }
   }
 
@@ -499,7 +499,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (binding.pending.length !== 0) {
         const observations = binding.pending.splice(0)
         for (const observation of observations) ctx.voice.appendTaskObservation(session.id, observation)
-        ctx.voice.requestResponse(session.id, { kind: 'automatic' })
+        if (observations.some(isTerminalObservation)) {
+          ctx.voice.requestResponse(session.id, { kind: 'automatic' })
+        }
       }
     })
   })
@@ -620,6 +622,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     handles.clear()
     if (failures.length > 0) throw new AggregateError(failures, 'failed to dispose voice-assistant resources')
   }, 'voice-assistant lifecycle')
+}
+
+function isTerminalObservation(observation: TaskObservation): boolean {
+  return observation.status === 'completed'
+    || observation.status === 'failed'
+    || observation.status === 'cancelled'
 }
 
 function observeSessionEvent(

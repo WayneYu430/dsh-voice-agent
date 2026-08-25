@@ -12,7 +12,7 @@ import {
   type TaskObservation,
   type VoiceProviderEvent,
 } from '@wayneyu430227/dsh-voice'
-import { decodeEvent, DuplexSession, type RawEvent } from '@wayneyu430227/dsh-voice-duplex'
+import { decodeEvent, DuplexSession, type DuplexDiagnosticEntry, type RawEvent } from '@wayneyu430227/dsh-voice-duplex'
 import { describe, expect, it, vi } from 'vitest'
 
 const TEST_VOICE_SESSION_ID = VoiceSessionId('voice-test')
@@ -59,9 +59,11 @@ function providerConfig(endpoint: string, overrides: Partial<SessionConfig> = {}
     instructions: 'provider test',
     triggerAudio: new Uint8Array([1, 0, 2, 0]),
     maxDeferredInputAudioBytes: 1024,
+    frontendAgentActivationDelayMs: 0,
     endSmoothWindowMs: 0,
     enableCustomVad: true,
     transcriptionDeltaTimeoutMs: 1000,
+    diagnosticTrace: false,
     ...overrides,
   }
 }
@@ -157,6 +159,7 @@ class FakeSocket extends EventEmitter {
 }
 
 interface DetachedSession {
+  readonly diagnostics: DuplexDiagnosticEntry[]
   readonly events: VoiceProviderEvent[]
   readonly session: DuplexSession
   readonly socket: FakeSocket
@@ -169,11 +172,13 @@ function createDetachedSession(
 ): DetachedSession {
   const socket = new FakeSocket()
   const events: VoiceProviderEvent[] = []
+  const diagnostics: DuplexDiagnosticEntry[] = []
   const SessionConstructor = DuplexSession as unknown as new (
     socket: WebSocket,
     emit: (event: VoiceProviderEvent) => void,
     config: SessionConfig,
     voiceSessionId: ReturnType<typeof VoiceSessionId>,
+    diagnostic?: (entry: DuplexDiagnosticEntry) => void,
   ) => DuplexSession
   const session = new SessionConstructor(socket as unknown as WebSocket, (event) => { events.push(event) }, {
     interactionMode,
@@ -188,12 +193,14 @@ function createDetachedSession(
     instructions: 'detached test',
     triggerAudio: new Uint8Array([1, 0, 2, 0]),
     maxDeferredInputAudioBytes: 4,
+    frontendAgentActivationDelayMs: 0,
     endSmoothWindowMs: 0,
     enableCustomVad: true,
     transcriptionDeltaTimeoutMs: 1,
+    diagnosticTrace: false,
     ...overrides,
-  }, TEST_VOICE_SESSION_ID)
-  return { events, session, socket, state: internals(session) }
+  }, TEST_VOICE_SESSION_ID, (entry) => { diagnostics.push(entry) })
+  return { diagnostics, events, session, socket, state: internals(session) }
 }
 
 async function connectTestSession(
@@ -228,9 +235,11 @@ async function connectTestSession(
     instructions: 'frontend test',
     triggerAudio: new Uint8Array([1, 0, 2, 0]),
     maxDeferredInputAudioBytes: 1024,
+    frontendAgentActivationDelayMs: 0,
     endSmoothWindowMs: 0,
     enableCustomVad: true,
     transcriptionDeltaTimeoutMs: 1000,
+    diagnosticTrace: false,
     ...overrides,
   }, voiceSessionId, (event) => { events.push(event) })
   return {
@@ -545,22 +554,22 @@ describe('Duplex frontend-Agent session', () => {
       await waitFor(() => connection.frames.some(frame => frame.type === 'conversation.item.update'))
       const update = connection.frames.find(frame => frame.type === 'conversation.item.update')
       expect(update).toMatchObject({ items: [{ id: 'question-1' }] })
-      expect(JSON.stringify(update)).toContain('请检查仓库\\n\\n[与本问题关联的任务结果]')
-      expect(JSON.stringify(update)).toContain('\\"channel\\":\\"COMPLETE\\"')
-      expect(JSON.stringify(update)).toContain('检查完成')
+      const serializedUpdate = JSON.stringify(update)
+      expect(serializedUpdate).toContain('请检查仓库\\n\\n[后台任务回灌]\\n状态：已完成\\n结果：检查完成\\n[/后台任务回灌]')
+      expect(serializedUpdate).not.toContain('dsh_task_observation')
+      expect(serializedUpdate).not.toContain('task-1')
+      expect(serializedUpdate).not.toContain('assistant-1')
+      expect(serializedUpdate).not.toContain('task_turn')
+      expect(serializedUpdate).not.toContain('channel')
       connection.send({ type: 'conversation.item.updated' })
-      await waitFor(() => connection.frames.filter(frame => frame.type === 'input_audio_buffer.commit').length === 1)
-
-      const transcriptionCount = connection.events.filter(event => event.type.startsWith('transcription.')).length
-      connection.send({ type: 'conversation.item.input_audio_transcription.started' })
-      connection.send({ type: 'conversation.item.input_audio_transcription.delta', delta: '任务结果好了' })
-      connection.send({
-        type: 'conversation.item.input_audio_transcription.completed',
-        item_id: 'synthetic-1',
-        transcript: '任务结果好了',
+      await waitFor(() => connection.frames.some(frame => frame.type === 'speech_text_buffer.commit'))
+      expect(connection.frames.find(frame => frame.type === 'speech_text_buffer.commit')).toMatchObject({
+        text: '检查完成',
       })
-      await settleSocket()
-      expect(connection.events.filter(event => event.type.startsWith('transcription.'))).toHaveLength(transcriptionCount)
+      expect(connection.frames).not.toContainEqual(expect.objectContaining({ type: 'input_audio_buffer.commit' }))
+      expect(connection.events.find(event => event.type === 'output_text.done')).toMatchObject({
+        text: '检查完成',
+      })
     } finally {
       await connection.close()
     }
@@ -899,14 +908,16 @@ describe('Duplex session state guards', () => {
       status: 'running',
       taskTurn: 1,
       channel: 'STATUS',
-      voiceMessage: { id: VoiceTaskMessageId('activation-message'), text: 'working' },
-      announcement: 'progress',
-      reason: 'none',
     })
     detached.session.requestResponse({ kind: 'automatic' })
     detached.session.appendAudio(new Uint8Array([1, 2, 3, 4]))
     detached.session.appendTaskObservation({ taskId, status: 'running' })
     await waitFor(() => detached.socket.frames.some(frame => frame.type === 'conversation.item.update'))
+    const firstUpdate = JSON.stringify(detached.socket.frames.find(frame => frame.type === 'conversation.item.update'))
+    expect(firstUpdate).toContain('[后台任务回灌]\\n状态：执行中\\n[/后台任务回灌]')
+    expect(firstUpdate).not.toContain('activation-task')
+    expect(firstUpdate).not.toContain('task_turn')
+    expect(firstUpdate).not.toContain('channel')
     detached.state.receive({ type: 'conversation.item.updated' })
     await detached.state.sendChain
     await Promise.resolve()
@@ -930,14 +941,77 @@ describe('Duplex session state guards', () => {
     expect(detached.state.automaticResponseRequested).toBe(false)
   })
 
+  it('updates and reads back context before speaking the exact backend result', async () => {
+    const detached = createDetachedSession('frontend-agent', {
+      diagnosticTrace: true,
+      frontendAgentActivationDelayMs: 1,
+    })
+    const taskId = VoiceTaskId('diagnostic-task')
+    detached.state.taskProjections.set(taskId, {
+      questionId: 'diagnostic-question',
+      transcript: '检查最后一次提交',
+      revision: 0,
+    })
+    detached.session.appendTaskObservation({
+      taskId,
+      status: 'completed',
+      channel: 'COMPLETE',
+      voiceMessage: { id: VoiceTaskMessageId('diagnostic-message'), text: '提交是 abc123' },
+    })
+    detached.session.requestResponse({ kind: 'automatic' })
+    await waitFor(() => detached.socket.frames.some(frame => frame.type === 'conversation.item.update'))
+    detached.state.receive({ type: 'conversation.item.updated', event_id: 'provider-update-ack' })
+    await waitFor(() => detached.socket.frames.some(frame => frame.type === 'conversation.item.retrieve'))
+    detached.state.receive({
+      type: 'conversation.item.retrieved',
+      item: { id: 'diagnostic-question', content: '检查最后一次提交\n提交是 abc123', audio: 'PCM-SECRET' },
+    })
+    await detached.state.sendChain
+    await Promise.resolve()
+    expect(detached.socket.frames.map(frame => frame.type)).toEqual(expect.arrayContaining([
+      'conversation.item.update',
+      'conversation.item.retrieve',
+      'speech_text_buffer.commit',
+    ]))
+    expect(detached.socket.frames).not.toContainEqual(expect.objectContaining({ type: 'input_audio_buffer.commit' }))
+    expect(detached.socket.frames.find(frame => frame.type === 'speech_text_buffer.commit')).toMatchObject({
+      text: '提交是 abc123',
+    })
+    expect(detached.events.find(event => event.type === 'output_text.done')).toMatchObject({
+      text: '提交是 abc123',
+    })
+    const diagnosticTypes = detached.diagnostics.map(entry => entry.type)
+    expect(diagnosticTypes).toEqual(expect.arrayContaining([
+      'task.observation',
+      'conversation.item.update',
+      'conversation.item.updated',
+      'conversation.item.retrieve',
+      'conversation.item.retrieved',
+      'speech_text_buffer.commit',
+    ]))
+    expect(diagnosticTypes.indexOf('conversation.item.retrieved'))
+      .toBeLessThan(diagnosticTypes.indexOf('speech_text_buffer.commit'))
+    expect(diagnosticTypes).not.toContain('frontend.trigger_audio')
+    expect(JSON.stringify(detached.diagnostics)).toContain('提交是 abc123')
+    expect(JSON.stringify(detached.diagnostics)).not.toContain('test-access-key')
+    expect(JSON.stringify(detached.diagnostics)).not.toContain('PCM-SECRET')
+  })
+
   it('reports unavailable and failed automatic activation paths', async () => {
     const unavailable = createDetachedSession('frontend-agent', { triggerAudio: undefined })
+    const unavailableTask = VoiceTaskId('unavailable')
+    unavailable.state.taskProjections.set(unavailableTask, {
+      questionId: 'unavailable-question',
+      transcript: 'question',
+      observation: { taskId: unavailableTask, status: 'completed' },
+      revision: 1,
+    })
     unavailable.state.automaticResponseRequested = true
-    unavailable.state.dirtyTasks.add(VoiceTaskId('unavailable'))
+    unavailable.state.dirtyTasks.add(unavailableTask)
     unavailable.state.pumpAutomaticResponse()
     expect(unavailable.events.at(-1)).toEqual({
       type: 'error',
-      message: 'Duplex frontend response trigger audio is unavailable',
+      message: 'Duplex frontend response has neither backend speech text nor trigger audio',
     })
 
     const failed = createDetachedSession()

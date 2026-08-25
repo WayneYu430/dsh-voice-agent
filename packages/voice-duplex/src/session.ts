@@ -43,9 +43,19 @@ export interface ResolvedConfig {
   readonly instructions: string
   readonly triggerAudio: Uint8Array | undefined
   readonly maxDeferredInputAudioBytes: number
+  readonly frontendAgentActivationDelayMs: number
   readonly endSmoothWindowMs: number
   readonly enableCustomVad: boolean
   readonly transcriptionDeltaTimeoutMs: number
+  readonly diagnosticTrace: boolean
+}
+
+/** One redacted semantic checkpoint from a diagnostic Duplex session. */
+export interface DuplexDiagnosticEntry {
+  readonly elapsedMs: number
+  readonly direction: 'internal' | 'upstream' | 'downstream'
+  readonly type: string
+  readonly data?: unknown
 }
 
 const AUDIO = { inputSampleRate: 16_000, outputSampleRate: 24_000, format: 'pcm_s16le' as const }
@@ -71,6 +81,7 @@ export class DuplexSession implements VoiceProviderSession {
   readonly audio = AUDIO
   readonly interactionMode: VoiceInteractionMode
   private readonly socket: WebSocket
+  private readonly diagnosticStartedAt = performance.now()
   private sendChain = Promise.resolve()
   private eventId = 0
   private closed = false
@@ -95,6 +106,7 @@ export class DuplexSession implements VoiceProviderSession {
   private activationUpload = false
   private syntheticInputPending = false
   private resolveUpdateAck: (() => void) | undefined
+  private resolveRetrieve: (() => void) | undefined
   private deferredInputBytes = 0
   private deferredOverflowReported = false
   private readonly deferredInput: Uint8Array[] = []
@@ -108,6 +120,7 @@ export class DuplexSession implements VoiceProviderSession {
     private readonly emit: (event: VoiceProviderEvent) => void,
     private readonly config: ResolvedConfig,
     private readonly voiceSessionId: VoiceSessionId,
+    private readonly diagnostic?: (entry: DuplexDiagnosticEntry) => void,
   ) {
     this.socket = socket
     this.interactionMode = config.interactionMode
@@ -118,15 +131,17 @@ export class DuplexSession implements VoiceProviderSession {
    * @param config - resolved config.
    * @param voiceSessionId - transport identity used to namespace provider-local ids.
    * @param emit - normalized event receiver.
+   * @param diagnostic - optional receiver for redacted semantic checkpoints.
    * @returns live session.
    */
   static async connect(
     config: ResolvedConfig,
     voiceSessionId: VoiceSessionId,
     emit: (event: VoiceProviderEvent) => void,
+    diagnostic?: (entry: DuplexDiagnosticEntry) => void,
   ): Promise<DuplexSession> {
     const socket = await connectSocket(config)
-    const session = new DuplexSession(socket, emit, config, voiceSessionId)
+    const session = new DuplexSession(socket, emit, config, voiceSessionId, diagnostic)
     await session.handshake()
     socket.on('message', (data) => { session.receive(decodeEvent(data)) })
     socket.on('close', (_code, reason) => { session.onClosed(reason.toString()) })
@@ -171,6 +186,7 @@ export class DuplexSession implements VoiceProviderSession {
   }
 
   appendTaskObservation(event: TaskObservation): void {
+    this.trace('internal', 'task.observation', event)
     if (this.interactionMode === 'frontend-agent') {
       const projection = this.taskProjections.get(event.taskId)
       if (projection === undefined) {
@@ -214,6 +230,7 @@ export class DuplexSession implements VoiceProviderSession {
       })
     }
     this.responseExpected = true
+    this.trace('upstream', 'conversation.item.create', { callId, result })
     this.send({
       type: 'conversation.item.create',
       event_id: this.newEventId(),
@@ -247,6 +264,14 @@ export class DuplexSession implements VoiceProviderSession {
         }
       }
       this.socket.on('message', message)
+    })
+    this.trace('upstream', 'session.create', {
+      sessionId,
+      model: this.config.model,
+      instructions: this.config.instructions,
+      tools: this.interactionMode === 'frontend-agent'
+        ? duplexTaskCommandTools().map(tool => tool.name)
+        : [],
     })
     await this.queue({
       type: 'session.create',
@@ -291,6 +316,11 @@ export class DuplexSession implements VoiceProviderSession {
       case 'conversation.item.input_audio_transcription.completed': {
         this.clearTranscriptionTimer()
         if (this.syntheticInputPending) {
+          this.trace('downstream', type, {
+            synthetic: true,
+            itemId: stringId(event.item_id, event.question_id),
+            transcript: eventText(event),
+          })
           this.syntheticInputPending = false
           return
         }
@@ -301,6 +331,7 @@ export class DuplexSession implements VoiceProviderSession {
           this.latestQuestionId = questionId
           this.questionTranscripts.set(questionId, text)
         }
+        this.trace('downstream', type, { synthetic: false, questionId, transcript: text })
         const currentUtteranceId = this.readUtteranceId(event)
         this.emit({ type: 'transcription.completed', utteranceId: currentUtteranceId, text })
         this.finishUtterance(currentUtteranceId)
@@ -326,8 +357,14 @@ export class DuplexSession implements VoiceProviderSession {
         this.pumpAutomaticResponse()
         return
       case 'conversation.item.updated':
+        this.trace('downstream', type, event)
         this.resolveUpdateAck?.()
         this.resolveUpdateAck = undefined
+        return
+      case 'conversation.item.retrieved':
+        this.trace('downstream', type, event)
+        this.resolveRetrieve?.()
+        this.resolveRetrieve = undefined
         return
       case 'response.function_call_arguments.done':
         if (this.interactionMode === 'frontend-agent') this.receiveTaskCommands(event)
@@ -354,6 +391,7 @@ export class DuplexSession implements VoiceProviderSession {
         const responseUtteranceId = utteranceId(currentResponseId)
         this.startOutputText(responseUtteranceId, currentResponseId)
         const text = eventText(event) || this.responseTexts.get(currentResponseId) || ''
+        this.trace('downstream', type, { responseId: currentResponseId, text })
         this.responseTexts.delete(currentResponseId)
         this.emit({
           type: 'output_text.done',
@@ -439,12 +477,14 @@ export class DuplexSession implements VoiceProviderSession {
       if (!this.commandContexts.has(decoded.call.id)) {
         this.commandContexts.set(decoded.call.id, { questionId, command: decoded.call.command })
       }
+      this.trace('downstream', 'task.command', { questionId, call: decoded.call })
       this.emit({ type: 'task.command', call: decoded.call })
     }
   }
 
   private sendTaskCommandResult(callId: VoiceCommandCallId, result: TaskCommandResult): void {
     this.responseExpected = true
+    this.trace('upstream', 'conversation.item.create', { callId, result })
     this.send({
       type: 'conversation.item.create',
       event_id: this.newEventId(),
@@ -457,18 +497,15 @@ export class DuplexSession implements VoiceProviderSession {
       || !this.automaticResponseRequested
       || this.closed
       || this.isAutomaticResponseBusy()) return
-    const triggerAudio = this.config.triggerAudio
-    if (triggerAudio === undefined) {
-      this.automaticResponseRequested = false
-      this.emit({ type: 'error', message: 'Duplex frontend response trigger audio is unavailable' })
-      return
-    }
     const revisions = new Map<VoiceTaskId, number>()
     const items: RawEvent[] = []
+    const speechTexts: string[] = []
     for (const taskId of this.dirtyTasks) {
       const projection = this.taskProjections.get(taskId)
       if (projection?.observation === undefined) continue
       revisions.set(taskId, projection.revision)
+      const speechText = taskObservationSpeechText(projection.observation)
+      if (speechText !== undefined) speechTexts.push(speechText)
       items.push(conversationTextUpdateItem(
         projection.questionId,
         renderTaskProjection(projection.transcript, projection.observation),
@@ -478,25 +515,73 @@ export class DuplexSession implements VoiceProviderSession {
       this.automaticResponseRequested = false
       return
     }
+    const speechText = speechTexts.join('\n')
+    const triggerAudio = this.config.triggerAudio
+    if (speechText === '' && triggerAudio === undefined) {
+      this.automaticResponseRequested = false
+      this.emit({ type: 'error', message: 'Duplex frontend response has neither backend speech text nor trigger audio' })
+      return
+    }
     this.automaticResponseRequested = false
     this.activationInFlight = true
     this.activationUpload = true
-    this.syntheticInputPending = true
+    this.syntheticInputPending = speechText === ''
     this.responseExpected = true
     const activation = this.queueWork(async () => {
       // The provider must apply the context update before the trigger audio starts
       // a new inference turn; otherwise the model answers the trigger without the
       // backfilled observation and hallucinates. Await the provider's ack (with a
       // fallback timeout so a missing ack cannot wedge the automatic-response lane).
+      const updateEventId = this.newEventId()
+      this.trace('upstream', 'conversation.item.update', { eventId: updateEventId, items })
       const updated = this.waitForUpdateAck(UPDATE_ACK_TIMEOUT_MS)
-      await this.transmit({ type: 'conversation.item.update', event_id: this.newEventId(), items })
+      await this.transmit({ type: 'conversation.item.update', event_id: updateEventId, items })
       await updated
+      if (this.config.diagnosticTrace) {
+        const questionIds = items.flatMap(item => typeof item.id === 'string' ? [item.id] : [])
+        const retrieveEventId = this.newEventId()
+        const retrieved = this.waitForRetrieve(UPDATE_ACK_TIMEOUT_MS)
+        this.trace('upstream', 'conversation.item.retrieve', { eventId: retrieveEventId, questionIds })
+        await this.transmit({
+          type: 'conversation.item.retrieve',
+          event_id: retrieveEventId,
+          items: questionIds.map(id => ({ id })),
+        })
+        await retrieved
+      }
+      if (speechText !== '') {
+        const eventId = this.newEventId()
+        const speechId = randomUUID()
+        const speechResponseId = responseId(`${this.voiceSessionId}:response:speech:${speechId}`)
+        const speechUtteranceId = utteranceId(speechResponseId)
+        this.generation += 1
+        this.trace('upstream', 'speech_text_buffer.commit', { eventId, speechId, text: speechText })
+        await this.transmit({ type: 'speech_text_buffer.commit', event_id: eventId, speech_id: speechId, text: speechText })
+        this.emit({ type: 'output_text.started', utteranceId: speechUtteranceId, responseId: speechResponseId })
+        this.emit({
+          type: 'output_text.done',
+          utteranceId: speechUtteranceId,
+          responseId: speechResponseId,
+          text: speechText,
+        })
+        return
+      }
+      if (this.config.frontendAgentActivationDelayMs > 0) {
+        this.trace('internal', 'frontend.activation_delay', {
+          milliseconds: this.config.frontendAgentActivationDelayMs,
+        })
+        await wait(this.config.frontendAgentActivationDelayMs)
+      }
+      if (triggerAudio === undefined) throw new Error('Duplex frontend response trigger audio is unavailable')
+      this.trace('internal', 'frontend.trigger_audio', { bytes: triggerAudio.byteLength })
       for (let offset = 0; offset < triggerAudio.byteLength; offset += TRIGGER_CHUNK_BYTES) {
         if (this.closed) throw new Error('Duplex session closed during frontend response activation')
         await this.transmit(audioAppend(triggerAudio.subarray(offset, offset + TRIGGER_CHUNK_BYTES)))
         if (offset + TRIGGER_CHUNK_BYTES < triggerAudio.byteLength) await wait(TRIGGER_CHUNK_INTERVAL_MS)
       }
-      await this.transmit({ type: 'input_audio_buffer.commit', event_id: this.newEventId() })
+      const commitEventId = this.newEventId()
+      this.trace('upstream', 'input_audio_buffer.commit', { eventId: commitEventId, synthetic: true })
+      await this.transmit({ type: 'input_audio_buffer.commit', event_id: commitEventId })
     })
     void activation.then(() => {
       for (const [taskId, revision] of revisions) {
@@ -528,14 +613,37 @@ export class DuplexSession implements VoiceProviderSession {
   private waitForUpdateAck(timeoutMs: number): Promise<void> {
     return new Promise<void>((resolve) => {
       let settled = false
+      const timer = setTimeout(() => {
+        this.trace('internal', 'conversation.item.update.timeout', { timeoutMs })
+        settle()
+      }, timeoutMs)
       const settle = (): void => {
         if (settled) return
         settled = true
+        clearTimeout(timer)
         this.resolveUpdateAck = undefined
         resolve()
       }
       this.resolveUpdateAck = settle
-      setTimeout(settle, timeoutMs)
+    })
+  }
+
+  /** Resolve when diagnostic readback arrives, or after the fallback timeout. */
+  private waitForRetrieve(timeoutMs: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        this.trace('internal', 'conversation.item.retrieve.timeout', { timeoutMs })
+        settle()
+      }, timeoutMs)
+      const settle = (): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        this.resolveRetrieve = undefined
+        resolve()
+      }
+      this.resolveRetrieve = settle
     })
   }
 
@@ -633,6 +741,15 @@ export class DuplexSession implements VoiceProviderSession {
     this.transcriptionTimer = undefined
   }
   private newEventId(): string { this.eventId += 1; return `event_${String(this.eventId)}` }
+  private trace(direction: DuplexDiagnosticEntry['direction'], type: string, data?: unknown): void {
+    if (!this.config.diagnosticTrace || this.diagnostic === undefined) return
+    this.diagnostic({
+      elapsedMs: Math.round(performance.now() - this.diagnosticStartedAt),
+      direction,
+      type,
+      ...(data === undefined ? {} : { data: redactDiagnosticData(data) }),
+    })
+  }
   private send(event: RawEvent): void {
     void this.queue(event).catch((error: unknown) => { this.emit({ type: 'error', message: String(error) }) })
   }
@@ -679,17 +796,38 @@ function mergeTaskObservation(current: TaskObservation | undefined, next: TaskOb
 }
 
 function renderTaskProjection(transcript: string, observation: TaskObservation): string {
-  const snapshot = {
-    delegation_id: observation.taskId,
-    status: observation.status,
-    ...(observation.taskTurn === undefined ? {} : { task_turn: observation.taskTurn }),
-    ...(observation.channel === undefined ? {} : { channel: observation.channel }),
-    ...(observation.voiceMessage === undefined ? {} : { message: observation.voiceMessage }),
-    ...(observation.announcement === undefined ? {} : { announcement: observation.announcement }),
-    ...(observation.reason === undefined ? {} : { reason: observation.reason }),
+  const message = observation.voiceMessage?.text.trim()
+  const announcement = observation.announcement?.trim()
+  const reason = observation.reason?.trim()
+  const lines = ['[后台任务回灌]', `状态：${taskStatusText(observation.status)}`]
+  if (message !== undefined && message !== '') {
+    const label = observation.status === 'completed'
+      ? '结果'
+      : observation.status === 'running' || observation.status === 'accepted' ? '进度' : '说明'
+    lines.push(`${label}：${message}`)
+  } else if (announcement !== undefined && announcement !== '') {
+    lines.push(`通知：${announcement}`)
   }
+  if ((observation.status === 'failed' || observation.status === 'cancelled')
+    && reason !== undefined && reason !== '') lines.push(`原因：${reason}`)
+  lines.push('[/后台任务回灌]')
   const prefix = transcript.trim() === '' ? '' : `${transcript.trim()}\n\n`
-  return `${prefix}[与本问题关联的任务结果]\n[dsh_task_observation]\n${JSON.stringify(snapshot)}\n[/dsh_task_observation]`
+  return `${prefix}${lines.join('\n')}`
+}
+
+function taskObservationSpeechText(observation: TaskObservation): string | undefined {
+  const text = observation.voiceMessage?.text.trim() || observation.announcement?.trim()
+  return text === undefined || text === '' ? undefined : text
+}
+
+function taskStatusText(status: TaskObservation['status']): string {
+  switch (status) {
+    case 'accepted': return '已接收'
+    case 'running': return '执行中'
+    case 'completed': return '已完成'
+    case 'failed': return '失败'
+    case 'cancelled': return '已取消'
+  }
 }
 
 async function wait(milliseconds: number): Promise<void> {
@@ -699,6 +837,16 @@ async function wait(milliseconds: number): Promise<void> {
 function stringId(...values: unknown[]): string | undefined {
   const value = values.find(item => typeof item === 'string' && item !== '')
   return typeof value === 'string' ? value : undefined
+}
+
+function redactDiagnosticData(value: unknown): unknown {
+  if (value instanceof Uint8Array) return `[${String(value.byteLength)} PCM bytes redacted]`
+  if (Array.isArray(value)) return value.map(redactDiagnosticData)
+  if (value === null || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    key.toLowerCase().includes('audio') ? '[audio redacted]' : redactDiagnosticData(item),
+  ]))
 }
 
 async function connectSocket(config: ResolvedConfig): Promise<WebSocket> {

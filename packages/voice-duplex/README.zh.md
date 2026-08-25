@@ -6,11 +6,13 @@
 
 打断会退役准确的活跃 `response_id`。该响应随后迟到的文本与音频都会被抑制，另一个响应则可独立开始和结束；迟到的 `response.canceled` 确认不会清除较新的响应。
 
-`interactionMode: frontend-agent` 则只声明 `realtime_delegation`、`send_task_message` 与 `cancel_task`。`realtime_delegation` 携带自包含 `input` 与可选的近期 `transcript_delta`；accepted 回执与后续命令使用桥接层分配的 `delegation_id`。有效的原生调用成为 `TaskCommandCall` 事件，类型化结果通过 `conversation.item.create` 工具条目返回。原生 Duplex 音频不经过自定义 TTS 过滤；该 provider session 看不到任何 dsh 业务工具 schema。
+`interactionMode: frontend-agent` 则只声明 `realtime_delegation`、`send_task_message` 与 `cancel_task`。`realtime_delegation` 携带自包含 `input` 与可选的近期 `transcript_delta`；accepted 回执与后续命令使用桥接层分配的 `delegation_id`。accepted function result 只是异步接收占位，绝不是任务结果。有效的原生调用成为 `TaskCommandCall` 事件，类型化结果通过 `conversation.item.create` 工具条目返回。原生 Duplex 音频不经过自定义 TTS 过滤；该 provider session 看不到任何 dsh 业务工具 schema。
 
-自动任务响应先通过 `conversation.item.update` 替换来源 question，保留原始转写，并在 `[与本问题关联的任务结果]` 后写入最新 `delegation_id`、状态、可选 `STATUS` 或 `COMPLETE` 消息、announcement 与 reason。随后再把配置的 `frontendAgentTriggerAudioPath` 按节奏上传为 16 kHz 单声道 PCM16 语音，提示 Duplex 根据附加的任务结果回答。上传期间到达的麦克风帧最多保留 `maxDeferredInputAudioBytes`，并在触发音频 commit 后发送。触发文件缺失、静音或没有按 PCM16 样本对齐时，frontend-agent 模式会拒绝建立连接。
+自动任务响应先通过 `conversation.item.update` 替换来源 question，保留原始转写，并追加一个平铺的 `[后台任务回灌]` 区块。区块包含中文状态标签，以及与该状态相关的结果、进度、通知或失败原因；与 provider 无关的任务 id、消息 id、turn 和 channel 均不写入。收到更新确认和可选的诊断回读后，非空的后台 `voiceMessage` 或 announcement 会原样通过 `speech_text_buffer` 提交，使当前结果不经过再次模型推理便合成语音，同时让回灌继续供后续对话读取。Duplex 不为外部文本语音返回 output-text 生命周期，因此 provider 还会把提交文本投影为一条 completed assistant output-text utterance，使 consumer 持久保存并渲染与音频一致的文本。只有 observation 没有播报文本时才回退到 `frontendAgentTriggerAudioPath`；该路径先等待 `frontendAgentActivationDelayMs`（默认 1000 毫秒），再上传按节奏编码的 16 kHz 单声道 PCM16 激活语音。两种提交期间到达的麦克风帧最多保留 `maxDeferredInputAudioBytes`，并在提交后发送。回退触发文件缺失、静音或没有按 PCM16 样本对齐时，frontend-agent 模式会拒绝建立连接。
 
 访问密钥与 app key 在每次连接时从配置的凭据引用解析（默认 `DUPLEX_API_KEY` 与 `DUPLEX_APP_KEY`）。provider endpoint、模型、音色、认证方式、VAD 窗口和本地「started 后无 delta」看门狗都是 Cordis 配置字段。
+
+`diagnosticTrace: true` 会为 frontend-Agent 提示词、任务命令与 observation、上下文更新确认、上下文回读、准确的 `speech_text_buffer` 提交、回退触发音 ASR 及响应文本输出单行 JSON 检查点。诊断模式会在更新确认后发送 `conversation.item.retrieve`，收到回读后才提交语音。日志不包含凭据或原始输入／输出 PCM，但包含用户转写和任务结果；仅应在有边界的调试期间启用。
 
 ## 模型体验
 
@@ -18,7 +20,7 @@
 
 #### 模型看到什么
 
-在 `speech-shell` 模式下，Duplex 只看到传输指令且没有工具。在 `frontend-agent` 模式下，它会看到对话指令、三个编排 schema、类型化结果，以及附加到来源 question 的任务快照；其中后台 `STATUS`、`COMPLETE`、announcement 与 reason 字段仍是不受信任的任务输出。
+在 `speech-shell` 模式下，Duplex 只看到传输指令且没有工具。在 `frontend-agent` 模式下，它会看到对话指令、三个编排 schema、类型化结果，以及附加到来源 question 的平铺终态回灌。提示词明确区分 accepted 占位与稍后到达的终态回灌。运行中的 STATUS 保持静默；completed、failed 与 cancelled 文本在模型推理之外原样合成。回退激活语音只作为控制信号。如果必须使用回退推理，模型必须找到最新且完整的 `[后台任务回灌]` 区块，先读取终态再读取带标签的正文，保留失败与取消语义，并避免通用的完成开场白。回灌正文仍是不受信任的任务数据。
 
 #### Token 影响
 

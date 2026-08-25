@@ -21,6 +21,7 @@
         endSmoothWindowMs: 1500
         enableCustomVad: true
         transcriptionDeltaTimeoutMs: 1000
+        frontendAgentActivationDelayMs: 1000
 
     - id: voice-assistant
       name: '@wayneyu430227/dsh-voice-assistant'

@@ -1,7 +1,7 @@
 {
   "name": "@wayneyu430227/dsh-voice-agent",
   "description": "Voice interaction profile patch layered over dsh-web-app",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publishConfig": {
     "access": "public"
   },

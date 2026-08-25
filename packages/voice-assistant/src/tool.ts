@@ -38,8 +38,8 @@ export function installVoiceMessageTool(agentCtx: Context, send: VoiceMessageSen
     order: VOICE_MESSAGE_SECTION_ORDER,
     text: 'When a user message contains a <realtime_delegation> request or <realtime_delegation_update>, '
       + 'use send_voice_message with its delegation_id to keep the realtime voice assistant informed. '
-      + 'Send STATUS only for meaningful '
-      + 'user-facing progress; each STATUS is spoken promptly and may be sent more than once. Before a '
+      + 'Send STATUS only for meaningful user-facing progress; each STATUS is recorded silently and may '
+      + 'be sent more than once. Before a '
       + 'successful turn ends, send COMPLETE exactly once with the self-contained result the user should '
       + 'hear. The voice assistant does not automatically see your transcript, tool output, or reasoning. '
       + 'COMPLETE is held until the turn actually succeeds, and reporting never ends your turn. Do not use '
@@ -50,7 +50,7 @@ export function installVoiceMessageTool(agentCtx: Context, send: VoiceMessageSen
     disposeTool = agentCtx.tools.register(defineTool({
       name: 'send_voice_message',
       description: 'Send a user-facing status or final result to the realtime voice assistant for the exact '
-        + 'active delegation. STATUS is delivered promptly and may repeat for meaningful progress. COMPLETE '
+        + 'active delegation. STATUS is recorded silently and may repeat for meaningful progress. COMPLETE '
         + 'may be called once with a self-contained result and is held until the Agent turn succeeds; it does '
         + 'not finish the turn. The voice assistant does not otherwise see this Agent transcript or tool output.',
       parameters: {
