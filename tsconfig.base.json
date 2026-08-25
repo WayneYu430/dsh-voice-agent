@@ -59,10 +59,10 @@
       "@wayneyu430227/dsh-client-ui-voice/client": [
         "./packages/ui-voice/src/client"
       ],
-      "@wayneyu430227/dsh-voice-app": [
+      "@wayneyu430227/dsh-voice-agent": [
         "./packages/voice-app/src"
       ],
-      "@wayneyu430227/dsh-voice-app/invariant": [
+      "@wayneyu430227/dsh-voice-agent/invariant": [
         "./packages/voice-app/src/invariant.ts"
       ]
     }

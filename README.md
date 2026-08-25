@@ -16,13 +16,13 @@
 ## 安装
 
 ```sh
-dsh plugin add @wayneyu430227/dsh-voice-app
+dsh plugin add @wayneyu430227/dsh-voice-agent
 ```
 
 或安装到指定 profile：
 
 ```sh
-dsh plugin --profile <名称> add @wayneyu430227/dsh-voice-app
+dsh plugin --profile <名称> add @wayneyu430227/dsh-voice-agent
 ```
 
 ## 凭据

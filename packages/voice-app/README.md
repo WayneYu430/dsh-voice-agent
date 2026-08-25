@@ -1,4 +1,4 @@
-# `@wayneyu430227/dsh-voice-app`
+# `@wayneyu430227/dsh-voice-agent`
 
 English | [中文](README.zh.md)
 

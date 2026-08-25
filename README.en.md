@@ -16,13 +16,13 @@ Say a request out loud and dsh answers you in real time. When the request is rea
 ## Install
 
 ```sh
-dsh plugin add @wayneyu430227/dsh-voice-app
+dsh plugin add @wayneyu430227/dsh-voice-agent
 ```
 
 Or into a named profile:
 
 ```sh
-dsh plugin --profile <name> add @wayneyu430227/dsh-voice-app
+dsh plugin --profile <name> add @wayneyu430227/dsh-voice-agent
 ```
 
 ## Credentials
