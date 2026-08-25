@@ -1,4 +1,4 @@
-# dsh-voice-plugin
+# dsh-voice-agent
 
 English | [中文](README.md)
 

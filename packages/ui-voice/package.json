@@ -7,7 +7,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wayneyu430/dsh-voice-plugin.git",
+    "url": "git+https://github.com/WayneYu430/dsh-voice-agent.git",
     "directory": "packages/ui-voice"
   },
   "type": "module",
